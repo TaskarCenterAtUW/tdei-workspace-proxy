@@ -1,5 +1,5 @@
 const express = require('express');
-const { createProxyMiddleware, responseInterceptor } = require('http-proxy-middleware');
+const {createProxyMiddleware, responseInterceptor} = require('http-proxy-middleware');
 const fs = require('fs-extra');
 const moment = require('moment');
 const zlib = require('zlib');
@@ -13,7 +13,7 @@ const ENV_MAP = {
   prod: 'https://osm.workspaces.sidewalks.washington.edu',
 };
 
-function logToFile(env, message, logResponse = true) {
+const logToFile = (env, message, logResponse = true) => {
   const date = moment().format('DD_MM_YYYY');
   const filename = `${env}_log_${date}.txt`;
   const logPath = `./logs/${filename}`;
@@ -37,7 +37,7 @@ app.use((req, res, next) => {
     changeOrigin: true,
     pathRewrite: () => proxiedPath,
     selfHandleResponse: true,
-    agent: new https.Agent({ keepAlive: false }),
+    agent: new https.Agent({keepAlive: false}),
     on: {
       proxyRes: responseInterceptor(async (responseBuffer, proxyRes, req, res) => {
         const contentType = proxyRes.headers['content-type'] || '';

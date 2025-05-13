@@ -18,4 +18,4 @@ RUN mkdir -p logs
 EXPOSE 8000
 
 # Start the proxy server
-CMD ["node", "proxy-server.js"]
+CMD ["sh", "-c", "node proxy-server.js & node uploadLogsToAzure.js && wait"]
