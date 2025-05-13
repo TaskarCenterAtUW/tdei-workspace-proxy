@@ -1,0 +1,19 @@
+{
+  "name": "tdei-workspace-proxy",
+  "version": "1.0.0",
+  "description": "TDEI Proxy for Workspace APIs",
+  "main": "proxy-server.js",
+  "scripts": {
+    "start": "node proxy-server.js"
+  },
+  "author": "Sujata Mishra",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.1.0",
+    "fs-extra": "^11.3.0",
+    "http-proxy-middleware": "^3.0.5",
+    "https": "^1.0.0",
+    "moment": "^2.30.1",
+    "morgan": "^1.10.0"
+  }
+}
