@@ -31,7 +31,7 @@ This Node.js application acts as a reverse proxy that routes API requests to dif
 
 ```bash
 git clone https://github.com/your-org/env-proxy-server.git
-cd env-proxy-server
+cd tdei-workspace-proxy
 npm install
 ```
 
@@ -45,12 +45,12 @@ Your proxy will be live at: `http://localhost:8000`
 ## Run with Docker
 ### Build the Docker Image
 ```bash
-docker build -t env-proxy-server .
+docker build -t tdei-workspace-proxy .
 ```
 
 ### Run the Docker Container
 ```bash
-docker run -p 8000:8000 -v "$(pwd)/logs:/app/logs" env-proxy-server
+docker run -p 8000:8000 -v "$(pwd)/logs:/app/logs" tdei-workspace-proxy
 ```
 This will persist logs to your local `./logs` directory.
 
