@@ -12,10 +12,10 @@ RUN npm install
 COPY . .
 
 # Create logs directory
-RUN mkdir -p logs
+RUN mkdir -p logs logs/dev logs/stage logs/prod
 
 # Expose the port the app runs on
 EXPOSE 8000
 
 # Start the proxy server
-CMD ["sh", "-c", "node proxy-server.js & node uploadLogsToAzure.js && wait"]
+CMD ["node", "proxy-server.js"]

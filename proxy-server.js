@@ -1,6 +1,7 @@
 const express = require('express');
 const {createProxyMiddleware, responseInterceptor} = require('http-proxy-middleware');
 const fs = require('fs-extra');
+const path = require('path');
 const moment = require('moment');
 const zlib = require('zlib');
 const https = require('https');
@@ -15,11 +16,15 @@ const ENV_MAP = {
 
 const logToFile = (env, message, logResponse = true) => {
   const date = moment().format('DD_MM_YYYY');
-  const filename = `${env}_log_${date}.txt`;
-  const logPath = `./logs/${filename}`;
+  const subfolder = env.toLowerCase();
+  const filename = `log_${date}.txt`;
+  const logDir = path.join('./logs', subfolder);
+  const logPath = path.join(logDir, filename);
   const logEntry = `[${new Date().toISOString()}] ${message}\n`;
-  fs.ensureDirSync('./logs');
+  
+  fs.ensureDirSync(logDir);
   fs.appendFileSync(logPath, logEntry);
+  
   if (logResponse) console.log(`[${env}] ${message}`);
 }
 
