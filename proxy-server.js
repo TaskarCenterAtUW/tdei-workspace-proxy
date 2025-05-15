@@ -29,13 +29,30 @@ const logToFile = (env, message, logResponse = true) => {
 }
 
 app.use((req, res, next) => {
+  const contentType = req.headers['content-type'] || '';
+  if (contentType.includes('xml')) {
+    let rawData = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => rawData += chunk);
+    req.on('end', () => {
+      req.body = rawData;
+      next();
+    });
+  } else {
+    next();
+  }
+});
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.use((req, res, next) => {
   const segments = req.url.split('/').filter(Boolean);
   const env = segments[0];
   const target = ENV_MAP[env];
   if (!target) return res.status(400).send('Invalid environment prefix in URL');
   
   const proxiedPath = '/' + segments.slice(1).join('/');
-  logToFile(env, `REQUEST -> ${req.method} ${req.originalUrl}`);
   
   return createProxyMiddleware({
     target,
@@ -44,6 +61,34 @@ app.use((req, res, next) => {
     selfHandleResponse: true,
     agent: new https.Agent({keepAlive: false}),
     on: {
+      proxyReq: (proxyReq, req, res) => {
+        const contentType = req.headers['content-type'] || '';
+        const method = req.method.toUpperCase();
+        
+        // Build query param string
+        const queryParams = Object.keys(req.query || {}).length > 0
+          ? `\nQuery: ${JSON.stringify(req.query)}`
+          : '';
+        
+        let bodyParams = '';
+        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+          if (contentType.includes('xml') && typeof req.body === 'string') {
+            bodyParams = `\nBody (XML): ${req.body.slice(0, 1000)}...`;
+            
+            // Manually write body to proxy request
+            proxyReq.setHeader('Content-Length', Buffer.byteLength(req.body));
+            proxyReq.write(req.body);
+          } else if (typeof req.body === 'object') {
+            const jsonBody = JSON.stringify(req.body);
+            bodyParams = `\nBody (JSON): ${jsonBody}`;
+            
+            proxyReq.setHeader('Content-Length', Buffer.byteLength(jsonBody));
+            proxyReq.write(jsonBody);
+          }
+        }
+        
+        logToFile(env, `REQUEST -> ${method} ${req.originalUrl}${queryParams ? ' |' + queryParams : ''}${bodyParams ? ' |' + bodyParams : ''}`);
+      },
       proxyRes: responseInterceptor(async (responseBuffer, proxyRes, req, res) => {
         const contentType = proxyRes.headers['content-type'] || '';
         let bodyStr = '';
