@@ -14,7 +14,7 @@ const ENV_MAP = {
   prod: 'https://osm.workspaces.sidewalks.washington.edu',
 };
 
-const logToFile = (env, message, logResponse = true) => {
+const logToFile = async (env, message, logResponse = true) => {
   const date = moment().format('DD_MM_YYYY');
   const subfolder = env.toLowerCase();
   const filename = `log_${date}.txt`;
@@ -22,11 +22,14 @@ const logToFile = (env, message, logResponse = true) => {
   const logPath = path.join(logDir, filename);
   const logEntry = `[${new Date().toISOString()}] ${message}\n`;
   
-  fs.ensureDirSync(logDir);
-  fs.appendFileSync(logPath, logEntry);
-  
-  if (logResponse) console.log(`[${env}] ${message}`);
-}
+  try {
+    await fs.ensureDir(logDir);
+    await fs.appendFile(logPath, logEntry);
+    if (logResponse) console.log(`[${env}] ${message}`);
+  } catch (err) {
+    console.error(`[Log Error] ${err.message}`);
+  }
+};
 
 app.use((req, res, next) => {
   const contentType = req.headers['content-type'] || '';
@@ -63,6 +66,8 @@ app.use((req, res, next) => {
     on: {
       proxyReq: (proxyReq, req, res) => {
         const contentType = req.headers['content-type'] || '';
+        const xWorkspace = req.headers['x-workspace'];
+        const workspaceLog = xWorkspace ? ` | X-Workspace: ${xWorkspace}` : '';
         const method = req.method.toUpperCase();
         
         // Build query param string
@@ -73,7 +78,7 @@ app.use((req, res, next) => {
         let bodyParams = '';
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
           if (contentType.includes('xml') && typeof req.body === 'string') {
-            bodyParams = `\nBody (XML): ${req.body.slice(0, 1000)}...`;
+            bodyParams = `\nBody (XML): ${req.body.slice(0, 2000)}...`;
             
             // Manually write body to proxy request
             proxyReq.setHeader('Content-Length', Buffer.byteLength(req.body));
@@ -87,7 +92,7 @@ app.use((req, res, next) => {
           }
         }
         
-        logToFile(env, `REQUEST -> ${method} ${req.originalUrl}${queryParams ? ' |' + queryParams : ''}${bodyParams ? ' |' + bodyParams : ''}`);
+        void logToFile(env, `REQUEST -> ${method} ${req.originalUrl}${workspaceLog}${queryParams ? ' |' + queryParams : ''}${bodyParams ? ' |' + bodyParams : ''}`);
       },
       proxyRes: responseInterceptor(async (responseBuffer, proxyRes, req, res) => {
         const contentType = proxyRes.headers['content-type'] || '';
@@ -118,11 +123,11 @@ app.use((req, res, next) => {
         }
         
         if (contentType.includes('xml') || contentType.includes('json')) {
-          logToFile(env, `RESPONSE <- ${req.method} ${req.originalUrl} | STATUS: ${proxyRes.statusCode}\nBODY:\n${bodyStr.slice(0, 1000)}...`, false);
+          void logToFile(env, `RESPONSE <- ${req.method} ${req.originalUrl} | STATUS: ${proxyRes.statusCode}\nBODY:\n${bodyStr.slice(0, 2000)}...`, false);
         } else if (contentType.includes('text')) {
-          logToFile(env, `RESPONSE <- ${req.method} ${req.originalUrl} | STATUS: ${proxyRes.statusCode}\nBODY:\n${bodyStr}...`, false);
+          void logToFile(env, `RESPONSE <- ${req.method} ${req.originalUrl} | STATUS: ${proxyRes.statusCode}\nBODY:\n${bodyStr}...`, false);
         } else {
-          logToFile(env, `RESPONSE <- ${req.method} ${req.originalUrl} | STATUS: ${proxyRes.statusCode} (non-text content)`, false);
+          void logToFile(env, `RESPONSE <- ${req.method} ${req.originalUrl} | STATUS: ${proxyRes.statusCode} (non-text content)`, false);
         }
         
         return responseBuffer;
