@@ -1,0 +1,37 @@
+:8001
+
+@prodPath {
+    path /prod/*
+}
+@stagePath {
+    path /stage/*
+}
+@devPath {
+    path /dev/*
+}
+
+log prod {
+    output file ./logs/prod/log_{date}.txt
+    format json
+}
+log stage {
+    output file ./logs/stage/log_{date}.txt
+    format json
+}
+log dev {
+    output file ./logs/dev/log_{date}.txt
+    format json
+}
+
+handle_path @prodPath {
+    reverse_proxy https://osm.workspaces.sidewalks.washington.edu
+    log prod
+}
+handle_path @stagePath {
+    reverse_proxy https://osm.workspaces-stage.sidewalks.washington.edu
+    log stage
+}
+handle_path @devPath {
+    reverse_proxy https://osm.workspaces-dev.sidewalks.washington.edu
+    log dev
+}
