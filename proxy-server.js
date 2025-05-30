@@ -7,6 +7,7 @@ const https = require('https');
 const zlib = require('zlib');
 
 const app = express();
+const PORT = 8000;
 
 const ENV_MAP = {
   dev: 'https://osm.workspaces-dev.sidewalks.washington.edu',
@@ -14,24 +15,51 @@ const ENV_MAP = {
   prod: 'https://osm.workspaces.sidewalks.washington.edu',
 };
 
-const logToFile = async (env, message, logResponse = true) => {
-  const date = moment().format('DD_MM_YYYY');
-  const subfolder = env.toLowerCase();
-  const filename = `log_${date}.txt`;
-  const logDir = path.join('./logs', subfolder);
-  const logPath = path.join(logDir, filename);
-  const logEntry = `[${new Date().toISOString()}] ${message}\n`;
-  try {
-    await fs.ensureDir(logDir);
-    await fs.appendFile(logPath, logEntry);
-    if (logResponse) console.log(`[${env}] ${message}`);
-  } catch (err) {
-    console.error(`[Log Error] ${err.message}`);
+// -----------------------------
+// BATCHED FILE LOGGING SETUP
+// -----------------------------
+const logBuffer = {};
+const flushInterval = 2000;
+
+setInterval(() => {
+  for (const [env, messages] of Object.entries(logBuffer)) {
+    if (!messages.length) continue;
+    const date = moment().format('DD_MM_YYYY');
+    const filename = `log_${date}.txt`;
+    const logDir = path.join('./logs', env.toLowerCase());
+    const logPath = path.join(logDir, filename);
+    const batch = messages.join('\n') + '\n';
+    logBuffer[env] = [];
+    fs.ensureDir(logDir)
+      .then(() => fs.appendFile(logPath, batch))
+      .catch(console.error);
   }
+}, flushInterval);
+
+const logToFile = (env, line) => {
+  if (!logBuffer[env]) logBuffer[env] = [];
+  logBuffer[env].push(line);
 };
 
-// No express.json()/urlencoded()—let proxy handle raw body for maximum compatibility
+// -----------------------------
+// CAPTURE RAW BODY FOR POST/PUT
+// -----------------------------
+app.use((req, res, next) => {
+  if (['POST', 'PUT'].includes(req.method)) {
+    let rawBody = '';
+    req.on('data', chunk => rawBody += chunk.toString());
+    req.on('end', () => {
+      req.rawBody = rawBody;
+      next();
+    });
+  } else {
+    next();
+  }
+});
 
+// -----------------------------
+// PROXY SETUP WITH LOGGING
+// -----------------------------
 app.use((req, res, next) => {
   const segments = req.url.split('/').filter(Boolean);
   const env = segments[0];
@@ -39,64 +67,108 @@ app.use((req, res, next) => {
   if (!target) return res.status(400).send('Invalid environment prefix in URL');
   const proxiedPath = '/' + segments.slice(1).join('/');
   
-  const xWorkspace = req.headers['x-workspace'];
-  const workspaceLog = xWorkspace ? ` | X-Workspace: ${xWorkspace}` : '';
-  
   return createProxyMiddleware({
     target,
     changeOrigin: true,
     pathRewrite: () => proxiedPath,
-    agent: new https.Agent({ keepAlive: false }),
+    agent: new https.Agent({ keepAlive: true }),
+    
     on: {
-      proxyReq: (proxyReq, req, res) => {
-        void logToFile(
-          env,
-          `REQUEST -> ${req.method} ${req.originalUrl}${workspaceLog}\nRequest Headers: ${JSON.stringify(req.headers, null, 2)}`
-        );
+      proxyReq: (proxyReq, req) => {
+        req._startTime = Date.now();
+        const xWorkspace = req.headers['x-workspace'] || '-';
+        const userAgent = req.headers['user-agent'] || '-';
+        const time = new Date().toISOString();
+        
+        if (['POST', 'PUT'].includes(req.method) && req.rawBody) {
+          proxyReq.write(req.rawBody);
+          logToFile(env, JSON.stringify({
+            time,
+            type: 'request',
+            method: req.method,
+            url: req.originalUrl,
+            xWorkspace,
+            userAgent,
+            requestBody: req.rawBody
+          }));
+        } else {
+          logToFile(env, `{"time":"${time}","type":"request","method":"${req.method}","url":"${req.originalUrl}","xWorkspace":"${xWorkspace}","userAgent":"${userAgent}"}`);
+        }
       },
-      proxyRes: (proxyRes, req, res) => {
-        const contentLength = Number(proxyRes.headers['content-length']);
-        const encoding = proxyRes.headers['content-encoding'];
-        const shouldLogBody = !isNaN(contentLength) && contentLength < 100;
-        let chunks = [];
+      
+      proxyRes: (proxyRes, req) => {
+        const shouldLogBody = ['POST', 'PUT'].includes(req.method);
+        const chunks = [];
         
         if (shouldLogBody) {
-          proxyRes.on('data', chunk => {
-            chunks.push(chunk);
-          });
-          proxyRes.on('end', () => {
-            let responseBody = Buffer.concat(chunks);
-            // Decompress if needed
-            try {
-              if (encoding === 'gzip') {
-                responseBody = zlib.gunzipSync(responseBody);
-              } else if (encoding === 'br') {
-                responseBody = zlib.brotliDecompressSync(responseBody);
-              } else if (encoding === 'deflate') {
-                responseBody = zlib.inflateSync(responseBody);
-              }
-              responseBody = responseBody.toString('utf-8');
-            } catch (err) {
-              responseBody = `[Error decoding body: ${err.message}]`;
-            }
-            void logToFile(
-              env,
-              `Response for ${req.method} ${req.originalUrl}\nResponse Headers: ${JSON.stringify(proxyRes.headers, null, 2)}\nBody: ${responseBody.slice(0, 2000)}`
-            );
-          });
-        } else {
-          proxyRes.on('end', () => {
-            void logToFile(
-              env,
-              `Response for ${req.method} ${req.originalUrl}\nResponse Headers: ${JSON.stringify(proxyRes.headers, null, 2)} [body not logged]`
-            );
-          });
+          proxyRes.on('data', chunk => chunks.push(chunk));
         }
+        
+        proxyRes.on('end', () => {
+          const now = new Date().toISOString();
+          const duration = req._startTime ? `${Date.now() - req._startTime}ms` : '-';
+          const contentLength = proxyRes.headers['content-length'] || '-';
+          const statusCode = proxyRes.statusCode;
+          
+          if (!shouldLogBody) {
+            logToFile(env, `{"time":"${now}","type":"response","method":"${req.method}","url":"${req.originalUrl}","statusCode":${statusCode},"contentLength":"${contentLength}","duration":"${duration}"}`);
+          } else {
+            try {
+              const encoding = proxyRes.headers['content-encoding'];
+              let body = Buffer.concat(chunks);
+              const MAX_LOG_BYTES = 512_000;
+              
+              if (body.length <= MAX_LOG_BYTES) {
+                if (encoding === 'gzip') body = zlib.gunzipSync(body);
+                else if (encoding === 'br') body = zlib.brotliDecompressSync(body);
+                else if (encoding === 'deflate') body = zlib.inflateSync(body);
+                
+                const responseBody = body.toString('utf-8');
+                logToFile(env, JSON.stringify({
+                  time: now,
+                  type: 'response',
+                  method: req.method,
+                  url: req.originalUrl,
+                  statusCode,
+                  contentLength,
+                  duration,
+                  responseBody
+                }));
+              } else {
+                logToFile(env, JSON.stringify({
+                  time: now,
+                  type: 'response',
+                  method: req.method,
+                  url: req.originalUrl,
+                  statusCode,
+                  contentLength,
+                  duration,
+                  responseBody: '[Truncated: body exceeded 500KB]'
+                }));
+              }
+            } catch (err) {
+              logToFile(env, JSON.stringify({
+                time: now,
+                type: 'response',
+                method: req.method,
+                url: req.originalUrl,
+                statusCode,
+                contentLength,
+                duration,
+                responseBody: `[Error decoding body: ${err.message}]`
+              }));
+            }
+          }
+        });
       }
     }
+    
   })(req, res, next);
 });
 
-app.listen(8000, () => {
-  console.log('Proxy server is running at http://localhost:8000');
+// -----------------------------
+// START SERVER
+// -----------------------------
+app.listen(PORT, () => {
+  console.log(`Proxy server is running at http://localhost:${PORT}`);
 });
