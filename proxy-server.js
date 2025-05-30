@@ -1,10 +1,10 @@
 const express = require('express');
-const {createProxyMiddleware, responseInterceptor} = require('http-proxy-middleware');
+const { createProxyMiddleware } = require('http-proxy-middleware');
 const fs = require('fs-extra');
 const path = require('path');
 const moment = require('moment');
-const zlib = require('zlib');
 const https = require('https');
+const zlib = require('zlib');
 
 const app = express();
 
@@ -21,7 +21,6 @@ const logToFile = async (env, message, logResponse = true) => {
   const logDir = path.join('./logs', subfolder);
   const logPath = path.join(logDir, filename);
   const logEntry = `[${new Date().toISOString()}] ${message}\n`;
-  
   try {
     await fs.ensureDir(logDir);
     await fs.appendFile(logPath, logEntry);
@@ -31,112 +30,73 @@ const logToFile = async (env, message, logResponse = true) => {
   }
 };
 
-app.use((req, res, next) => {
-  const contentType = req.headers['content-type'] || '';
-  if (contentType.includes('xml')) {
-    let rawData = '';
-    req.setEncoding('utf8');
-    req.on('data', chunk => rawData += chunk);
-    req.on('end', () => {
-      req.body = rawData;
-      next();
-    });
-  } else {
-    next();
-  }
-});
-
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// No express.json()/urlencoded()—let proxy handle raw body for maximum compatibility
 
 app.use((req, res, next) => {
   const segments = req.url.split('/').filter(Boolean);
   const env = segments[0];
   const target = ENV_MAP[env];
   if (!target) return res.status(400).send('Invalid environment prefix in URL');
-  
   const proxiedPath = '/' + segments.slice(1).join('/');
+  
+  const xWorkspace = req.headers['x-workspace'];
+  const workspaceLog = xWorkspace ? ` | X-Workspace: ${xWorkspace}` : '';
   
   return createProxyMiddleware({
     target,
     changeOrigin: true,
     pathRewrite: () => proxiedPath,
-    selfHandleResponse: true,
-    agent: new https.Agent({keepAlive: false}),
+    agent: new https.Agent({ keepAlive: false }),
     on: {
       proxyReq: (proxyReq, req, res) => {
-        const contentType = req.headers['content-type'] || '';
-        const xWorkspace = req.headers['x-workspace'];
-        const workspaceLog = xWorkspace ? ` | X-Workspace: ${xWorkspace}` : '';
-        const method = req.method.toUpperCase();
-        
-        // Build query param string
-        const queryParams = Object.keys(req.query || {}).length > 0
-          ? `\nQuery: ${JSON.stringify(req.query)}`
-          : '';
-        
-        let bodyParams = '';
-        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
-          if (contentType.includes('xml') && typeof req.body === 'string') {
-            bodyParams = `\nBody (XML): ${req.body.slice(0, 2000)}...`;
-            
-            // Manually write body to proxy request
-            proxyReq.setHeader('Content-Length', Buffer.byteLength(req.body));
-            proxyReq.write(req.body);
-          } else if (typeof req.body === 'object') {
-            const jsonBody = JSON.stringify(req.body);
-            bodyParams = `\nBody (JSON): ${jsonBody}`;
-            
-            proxyReq.setHeader('Content-Length', Buffer.byteLength(jsonBody));
-            proxyReq.write(jsonBody);
-          }
-        }
-        
-        void logToFile(env, `REQUEST -> ${method} ${req.originalUrl}${workspaceLog}${queryParams ? ' |' + queryParams : ''}${bodyParams ? ' |' + bodyParams : ''}`);
+        void logToFile(
+          env,
+          `REQUEST -> ${req.method} ${req.originalUrl}${workspaceLog}\nRequest Headers: ${JSON.stringify(req.headers, null, 2)}`
+        );
       },
-      proxyRes: responseInterceptor(async (responseBuffer, proxyRes, req, res) => {
-        const contentType = proxyRes.headers['content-type'] || '';
-        let bodyStr = '';
-        let decoded;
+      proxyRes: (proxyRes, req, res) => {
+        const contentLength = Number(proxyRes.headers['content-length']);
+        const encoding = proxyRes.headers['content-encoding'];
+        const shouldLogBody = !isNaN(contentLength) && contentLength < 100;
+        let chunks = [];
         
-        try {
-          const encoding = proxyRes.headers['content-encoding'];
-          decoded = responseBuffer;
-          
-          if (encoding === 'gzip') {
-            decoded = zlib.gunzipSync(responseBuffer);
-          } else if (encoding === 'br') {
+        if (shouldLogBody) {
+          proxyRes.on('data', chunk => {
+            chunks.push(chunk);
+          });
+          proxyRes.on('end', () => {
+            let responseBody = Buffer.concat(chunks);
+            // Decompress if needed
             try {
-              decoded = zlib.brotliDecompressSync(responseBuffer);
-            } catch (brErr) {
-              // fallback if Brotli is incorrectly labeled
-              console.warn(`[${env}] Brotli decode failed: ${brErr.message}. Falling back to raw buffer.`);
-              decoded = responseBuffer;
+              if (encoding === 'gzip') {
+                responseBody = zlib.gunzipSync(responseBody);
+              } else if (encoding === 'br') {
+                responseBody = zlib.brotliDecompressSync(responseBody);
+              } else if (encoding === 'deflate') {
+                responseBody = zlib.inflateSync(responseBody);
+              }
+              responseBody = responseBody.toString('utf-8');
+            } catch (err) {
+              responseBody = `[Error decoding body: ${err.message}]`;
             }
-          } else if (encoding === 'deflate') {
-            decoded = zlib.inflateSync(responseBuffer);
-          }
-          
-          bodyStr = decoded.toString('utf8');
-        } catch (e) {
-          bodyStr = `<Error decoding body: ${e.message}>`;
-        }
-        
-        if (contentType.includes('xml') || contentType.includes('json')) {
-          void logToFile(env, `RESPONSE <- ${req.method} ${req.originalUrl} | STATUS: ${proxyRes.statusCode}\nBODY:\n${bodyStr.slice(0, 2000)}...`, false);
-        } else if (contentType.includes('text')) {
-          void logToFile(env, `RESPONSE <- ${req.method} ${req.originalUrl} | STATUS: ${proxyRes.statusCode}\nBODY:\n${bodyStr}...`, false);
+            void logToFile(
+              env,
+              `Response for ${req.method} ${req.originalUrl}\nResponse Headers: ${JSON.stringify(proxyRes.headers, null, 2)}\nBody: ${responseBody.slice(0, 2000)}`
+            );
+          });
         } else {
-          void logToFile(env, `RESPONSE <- ${req.method} ${req.originalUrl} | STATUS: ${proxyRes.statusCode} (non-text content)`, false);
+          proxyRes.on('end', () => {
+            void logToFile(
+              env,
+              `Response for ${req.method} ${req.originalUrl}\nResponse Headers: ${JSON.stringify(proxyRes.headers, null, 2)} [body not logged]`
+            );
+          });
         }
-        
-        return responseBuffer;
-      })
+      }
     }
-    
   })(req, res, next);
 });
 
 app.listen(8000, () => {
-  console.log('TDEI Workspace Proxy server is running at http://localhost:8000');
+  console.log('Proxy server is running at http://localhost:8000');
 });
